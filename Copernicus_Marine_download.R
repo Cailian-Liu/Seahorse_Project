@@ -4,7 +4,6 @@
 library(reticulate)
 library(terra)
 library(ggplot2)
-library(reticulate)
 
 # Use the Python environment that worked previously
 cm <- import("copernicusmarine")
