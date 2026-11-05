@@ -3,6 +3,7 @@ library(ggplot2)
 library(readxl)
 library(dplyr)
 library(sf)
+library(lubridate)
 
 
 bottom_env_all <- read.csv("./Copernicus_TaiwanStrait/near_bottom/bottom_env_all.csv")
@@ -12,7 +13,225 @@ logbook_data <- logbook_data %>%
   mutate(
     Date = as.Date(paste(Month, Day_corrected, sep = "-"))
   )
+range(logbook_data$Date)
 sum(is.na(logbook_data$Date))
+sum(is.na(logbook_data$Duration))
+sum(logbook_data$Seahorse != 0, na.rm = TRUE)
+
+
+#### Depth data
+depth <- read.table(
+  "cs_depth.txt",
+  header = FALSE,
+  sep = "\t")
+colnames(depth) <- c(
+  "Longitude",
+  "Latitude",
+  "Depth1",
+  "Depth2")
+head(depth)
+ggplot(depth, aes(Longitude, Latitude, fill = Depth2)) +
+  geom_tile(
+    width = 5 / 60,
+    height = 5 / 60
+  ) +
+  scale_fill_viridis_c(name = "Depth") +
+  coord_equal() +
+  theme_bw() #是规则的网格数据
+
+#convert to raster
+#恢复规则网格数据
+res_deg <- 5 / 60
+depth_fixed <- depth %>%
+  mutate(
+    Longitude = round(Longitude / res_deg) * res_deg,
+    Latitude  = round(Latitude / res_deg) * res_deg  )
+max(abs(depth$Longitude - depth_fixed$Longitude)) #坐标修正幅度小
+max(abs(depth$Latitude - depth_fixed$Latitude))
+depth_fixed %>%
+  count(Longitude, Latitude) %>%
+  filter(n > 1) #无重复坐标
+
+depth_r <- rast(
+  depth_fixed[, c("Longitude", "Latitude", "Depth2")],
+  type = "xyz",
+  crs = "EPSG:4326") #create raster
+print(depth_r)
+res(depth_r) # 5 arc-minutes
+
+
+####Near-bottom environment data###
+#also 5 arc-minutes resolution
+
+#logbook data resolution: irregular spatial points
+
+
+#将depth data跟env data网格对齐--这只是针对一天的
+env_day <- bottom_env_all %>%
+  filter(Date == "2022-08-01")
+#手动创建5‘raster
+res_deg <- 5 / 60
+lon0 <- min(env_day$Longitude, na.rm = TRUE)
+lat0 <- min(env_day$Latitude, na.rm = TRUE)
+# Grid indices, starting at zero
+col_id <- round((env_day$Longitude - lon0) / res_deg)
+row_id <- round((env_day$Latitude - lat0) / res_deg)
+# Check whether the coordinates fit a 5' grid --误差都很小，可以
+max(abs(env_day$Longitude - (lon0 + col_id * res_deg)))
+max(abs(env_day$Latitude - (lat0 + row_id * res_deg)))
+env_template <- rast(
+  ncols = max(col_id) + 1,
+  nrows = max(row_id) + 1,
+  xmin = lon0 - res_deg / 2,
+  xmax = lon0 + (max(col_id) + 0.5) * res_deg,
+  ymin = lat0 - res_deg / 2,
+  ymax = lat0 + (max(row_id) + 0.5) * res_deg,
+  crs = "EPSG:4326")
+res(env_template)
+ext(env_template)
+# Find raster cell for each original observation
+cell_id <- cellFromXY(
+  env_template,
+  cbind(
+    lon0 + col_id * res_deg,
+    lat0 + row_id * res_deg
+  )
+)
+# Check for duplicate cells
+sum(duplicated(cell_id))
+
+#将所有near-bottom环境变量转换成raster
+# Near-bottom environmental variables
+env_vars <- c(
+  "bottom_depth",
+  "bottom_temp",
+  "bottom_sal",
+  "bottom_u",
+  "bottom_v",
+  "bottom_speed")
+# Create one raster layer for each variable
+env_layers <- lapply(env_vars, function(v) {
+  r <- env_template
+  values(r) <- NA_real_
+  r[cell_id] <- env_day[[v]]
+  names(r) <- v
+  return(r)
+})
+# Combine layers
+env_r <- rast(env_layers)
+names(env_r)
+nlyr(env_r)
+
+#将depth_r对齐到Copernicus网格
+depth_aligned <- resample(
+  depth_r,
+  env_template,
+  method = "bilinear")
+names(depth_aligned) <- "depth_external"
+compareGeom(
+  depth_aligned,
+  env_r,
+  stopOnError = FALSE) #check
+env_all_r <- c(
+  env_r,
+  depth_aligned)
+names(env_all_r)
+#save as GEOTIFF, multiple rasters
+#writeRaster(env_all_r,"Copernicus_TaiwanStrait/near_bottom/env_all_2022-08-01.tif",  overwrite = TRUE)
+
+#read 
+#env_all_r <- rast("Copernicus_TaiwanStrait/near_bottom/env_all_2022-08-01.tif")
+names(env_all_r)
+res(env_all_r)
+ext(env_all_r)
+crs(env_all_r)
+
+#check how many hauls in one 5 arc-minutes cell
+haul_vect <- vect(
+  logbook,
+  geom = c(
+    "Longitude_haulback",
+    "Latitude_haulback"
+  ),
+  crs = "EPSG:4326"
+)
+# Assign each haul to a raster cell
+logbook$env_cell <- cellFromXY(
+  env_all_r,
+  crds(haul_vect))
+# Number of hauls per cell
+haul_density <- logbook %>%
+  count(env_cell, name = "n_hauls")
+hist(haul_density$n_hauls)
+haul_count_r <- rasterize(
+  haul_vect,
+  env_all_r[[1]],
+  field = 1,
+  fun = "sum",
+  background = 0)
+plot(haul_count_r) #整年的数据，确实有少数集中在某区域
+
+#check how many hauls in one cell using only August data
+logbook_env$cell_id <- cellFromXY(
+  env_all_r,
+  as.matrix(
+    logbook_env[, c(
+      "Longitude_haulback",
+      "Latitude_haulback"
+    )]
+  )
+)
+# 1. Select hauls on August 1, 2022
+haul_day <- logbook_env %>%
+  filter(Month == ("2022-08"))
+# 2. Match hauls to reference grid cells
+haul_day$cell_id <- cellFromXY(
+  env_all_r[[1]],
+  as.matrix(
+    haul_day[, c("Longitude_haulback", "Latitude_haulback")]
+  )
+)
+
+# 3. Count hauls per cell
+haul_count <- haul_day %>%
+  filter(!is.na(cell_id)) %>%
+  count(cell_id, name = "n_hauls")
+
+# 4. Create raster
+haul_r <- env_all_r[[1]]
+values(haul_r) <- 0
+
+haul_r[haul_count$cell_id] <- haul_count$n_hauls
+names(haul_r) <- "n_hauls"
+
+# 5. Plot
+plot(
+  haul_r,
+  main = "Number of hauls per 5' cell (2022-08)",
+  col = hcl.colors(20, "YlOrRd"),
+  axes = TRUE
+)
+
+#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ###### Env + Seahorse data merge ----
 
