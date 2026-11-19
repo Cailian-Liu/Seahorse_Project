@@ -1,12 +1,31 @@
+#安装Copernicusmarine，到Python312中----
+# python312 <- "C:/Users/12693/AppData/Local/Programs/Python/Python312/python.exe"
+# system2(
+#   python312,
+#   c("-m", "pip", "install", "copernicusmarine")
+# )
+# #检查是否安装成功
+# system2(
+#   python312,
+#   c("-m", "pip", "show", "copernicusmarine"),
+#   stdout = TRUE
+# )
 
-# install.packages(c("reticulate"))
-
+#重启R session，然后让R使用Python3.12----
+#这段代码必须在任何初始化 Python 的操作之前执行。
 library(reticulate)
-library(terra)
-library(ggplot2)
-
-# Use the Python environment that worked previously
+use_python(
+  "C:/Users/12693/AppData/Local/Programs/Python/Python312/python.exe",
+  required = TRUE
+)
+py_config()
 cm <- import("copernicusmarine")
+
+
+library(terra)
+library(tidyverse)
+library(ggplot2)
+library(ncdf4) #for nc_open()
 
 # Output folder
 out_dir <- "Copernicus_TaiwanStrait"
@@ -83,9 +102,9 @@ for (i in seq_along(months)) {
       ),
       
       minimum_longitude = 117,
-      maximum_longitude = 119.5,
-      minimum_latitude = 22.5,
-      maximum_latitude = 24.5,
+      maximum_longitude = 121,
+      minimum_latitude = 22,
+      maximum_latitude = 26,
       
       start_datetime = paste0(
         month_start, "T00:00:00"
@@ -446,8 +465,20 @@ ggplot(
 
 
 
+#计算每个网格的月平均温度和盐度
+bottom_env_monthly <- bottom_env_all %>%
+  mutate(
+    YearMonth = format(Date, "%Y-%m")
+  ) %>%
+  group_by(YearMonth, Longitude, Latitude) %>%
+  summarise(
+    bottom_temp = mean(bottom_temp, na.rm = TRUE),
+    bottom_sal = mean(bottom_sal, na.rm = TRUE),
+    bottom_depth = mean(bottom_depth, na.rm = TRUE), #这里是模型的有效层的深度，不是真实水深
+    .groups = "drop"
+  )
 
-
+write.csv(bottom_env_monthly,file.path(output_dir,"bottom_env_monthly.csv"), row.names = FALSE)
 
 
 
